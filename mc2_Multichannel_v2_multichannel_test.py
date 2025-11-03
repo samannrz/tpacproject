@@ -259,7 +259,7 @@ def create_acquisition(emission_num, reception_num) -> CfgMC2.AcqMC2:
 def create_filter() -> CfgMC2.FilterDefinition:
     return CfgMC2.FilterDefinition(Tpac.DigitalFilterBand.high_pass,
                                    attenuation_db=40.0,
-                                   freq_a_MHz=0.5,
+                                   freq_a_MHz=0.58,
                                    freq_b_MHz=15)
 
 
@@ -357,6 +357,7 @@ def store_data_frame(s: socket.socket,max_flush=1) -> int:
             break
     #frm = Tpac.decode_frame(s)
     nested_data = []
+    nested_metadata=[]
     # The kind of frame can be retrieved from the frame header:
     if frm.header.client_protocol_type == Tpac.F.ProtocolType.heartbeat:
         # This kind of void frame is received at a low pace.
@@ -405,7 +406,7 @@ def store_data_frame(s: socket.socket,max_flush=1) -> int:
                             'num_cycles': b.num_cycles, 'lost_ascan_count': b.lost_ascan_count,
                             'lost_packet_count': b.lost_packet_count, 'cycle_offset': b.cycle_offset,
                             'nb channels': b.nb_active_channels, 'ascan length': b.ascan_length_active_channel[channel],
-                            'active_channel_index': b.active_channel_indexes[channel]},
+                            'active_channel_index': b.active_channel_indexes[channel]}
 
                 offset = sum(b.ascan_length_active_channel[0:channel]) * b.channels_data_type_size[channel]
                 end_read = offset + b.ascan_length_active_channel[channel] * b.channels_data_type_size[channel]
@@ -413,7 +414,10 @@ def store_data_frame(s: socket.socket,max_flush=1) -> int:
                 # TODO check with several rectifications
                 cv = conversion[b.channels_data_type_size[channel]]
                 data = np.frombuffer(b.raw_sequence_data[offset:end_read], dtype=cv['typ'])
-            #      nested_data.append(data)
+
+                nested_data.append(data)
+                nested_metadata.append(metadata)
+
             # In the case of multichannel acquisitions, the data are provided
             # as a b.length_sequence_data bytes buffer: b.sequence_data.
             #
@@ -421,7 +425,7 @@ def store_data_frame(s: socket.socket,max_flush=1) -> int:
             #
             # The actual decoding of the A-scan is demonstrated and explained
             # in the on_refresh_ascan() callback of testGui-MC2.py program
-            return [data], metadata, 1, cv
+            return nested_data, nested_metadata, 1, cv
         else:
             # Should not be reached
             print(f"Unknown: {frm.header.client_protocol_type.name}, "
@@ -509,8 +513,10 @@ def main():
 
     # register the acquisition_callback (this last step is instructing AFM API
     # that we want to receive A-scan dataframes for those acquisitions)
-    acquisitions = [create_acquisition([0], [0])]
-        # , create_acquisition([1], [1])]
+    acquisitions = [create_acquisition([0], [0,1,2]),
+                    create_acquisition([1], [0,1,2]),
+                    create_acquisition([2], [0,1,2])
+                   ]
     for acq_id, acq in enumerate(acquisitions):
         mca = Tpac.MultichannelAcquisition(num_receive_channels=len(acq.receptions),
                                            receptions=acq.receptions,
@@ -521,7 +527,7 @@ def main():
                                            analog_gain=20.0)
 
         acqui = Tpac.AcqSpec(acq_type=Tpac.AcquisitionType.multichannel,
-                             num_cycles=1,
+                             num_cycles=3,
                              acq_id=acq_id,
                              multichannel_acquisition_spec=mca)
 
@@ -586,53 +592,65 @@ def main():
 
     #### Receiving data with decode_data_frame() function
     #####################################################
+    ds_factor = 5
+    point_factor = 10
+    range_us = 150
     plt.ion()  # Turn on interactive mode
+
+    # Create a 3x3 figure (rows = emitters, columns = receivers)
+    fig, axes = plt.subplots(3, 3, figsize=(12, 10))  # 3 emitters x 3 receivers
+
+    # Each subplot can have up to 3 lines (for multichannel acquisitions)
+    lines = [[None for _ in range(3)] for _ in range(3 * 3)]  # 9 subplots × 3 channels
+
+    # Set up each subplot
+    for row in range(3):
+        for col in range(3):
+            ax = axes[row, col]
+            ax.set_xlim(0,1000)
+
+            ax.set_ylim(-30, 30)
+            ax.grid(True)
+            ax.set_title(f"Emitter {row} | Receiver {col}")
+
+    fig.suptitle("Real-Time Data Plots")
+    plt.subplots_adjust(bottom=0.2, hspace=0.4)
+
+    # Add a stop button
+    stop_ax = plt.axes([0.4, 0.05, 0.2, 0.075])
+    stop_button = Button(stop_ax, 'Stop')
+    stop_button.on_clicked(stop)
+
+    # ===== Main acquisition loop =====
     while not stop_acquisition:
+        nested_data, nested_metadata, x, cv = store_data_frame(sdata, 160)
+        # print((nested_metadata[1]))
+        samples = np.arange(len(nested_data[0]))//ds_factor
+        samples = samples[::ds_factor]
+        if x >= 0:  # Only process A-scan frames
+            for ch_idx, metadata in enumerate(nested_metadata):
+                emitter = metadata['acq_id']  # row
+                receiver = metadata['active_channel_index']  # column
+                ax = axes[emitter, receiver]
 
-        # See the decode_data_frame() function for an example of ultrasonic
-        # data decoding. This function needs the data socket we opened above.
-        [data, metadata, x, cv] = store_data_frame(sdata,100)
-        if x >= 0:
-            acq_id = metadata[0]['acq_id']
-            compteur_ascan += x
-            # Create the main figure and button
-            if acq_id not in figures_dict:
-                fig, ax = plt.subplots()
-                plt.subplots_adjust(bottom=0.3)
-                line, = ax.plot([], [], lw=2)  # Create an empty line plot
-                ax.set_xlim(0, metadata[0]['ascan length']/10)
-                ax.set_ylim(-50, 50)
-                ax.set_title(f"Real-Time Data Plot for Acquisition ID {acq_id}")
+                # Create line if it does not exist
+                line_idx = emitter * 3 + receiver
+                if lines[line_idx][ch_idx] is None:
+                    lines[line_idx][ch_idx], = ax.plot([], [], lw=1)
 
-                # Add a stop button for the current figure
-                stop_ax = plt.axes([0.4, 0.05, 0.2, 0.075])
-                stop_button = Button(stop_ax, 'Stop')
-                stop_button.on_clicked(stop)
+                downsampled_data = nested_data[ch_idx][::ds_factor]
 
-                figures_dict[acq_id] = (fig, ax, line, stop_button)  # Store the figure, axes, and line
+                lines[line_idx][ch_idx].set_data(samples, downsampled_data / cv['factor'])
 
-            # Retrieve the figure and axes for the current acq_id
-            fig, ax, line, stop_button = figures_dict[acq_id]
-            print(metadata)
-            # Update the line data (If in a cycle you have two receivers or more, change the index of the data to plot the desired output)
-            line.set_data(np.arange(len(data[0]))/10, data[0] / cv['factor'])
-
-            # Redraw updated elements
-            ax.draw_artist(ax.patch)  # Redraw background
-            ax.draw_artist(line)  # Redraw the line
-
-            # Update the canvas
-            fig.canvas.blit(ax.bbox)  # Redraw only the axes region
-            fig.canvas.flush_events()  # Process GUI events
-            plt.gcf().canvas.flush_events()
-        #  plt.pause(0.0001)         # Allow GUI events to be processed
-
-        ### To activate if you want to stock data and save it
-        #  data_list.append(data)  # Append the vector to the list
-        #  metadata_list.append(metadata)
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()  # Update GUI
 
     plt.ioff()
-    plt.close("all")  # Close the figure to ensure it can be reopened next time
+    plt.close(fig)
+
+    ### To activate if you want to stock data and save it
+        #  data_list.append(data)  # Append the vector to the list
+        #  metadata_list.append(metadata)
 
     #### Stop pulser
     ################
