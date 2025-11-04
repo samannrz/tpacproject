@@ -587,65 +587,53 @@ def main():
 
     #### Receiving data with decode_data_frame() function
     #####################################################
-    import matplotlib.pyplot as plt
-    from matplotlib.widgets import Button
-    import numpy as np
-
-    stop_acquisition = False
-
-    def stop(event):
-        global stop_acquisition
-        stop_acquisition = True
-        print("Stop button clicked!")
-
-    # --- Create the figure and subplots once ---
-    plt.ion()  # interactive mode
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10))
-    axes = axes.flatten()  # Flatten for easier indexing
-
-    lines = [None] * 9  # One line per subplot
-
-    # Set up subplots
-    for idx, ax in enumerate(axes):
-        ax.set_xlim(0, 2000)  # Adjust to your A-scan length
-        ax.set_ylim(-50, 50)
-        ax.grid(True)
-        emitter = idx // 3  # row
-        receiver = idx % 3  # column
-        ax.set_title(f"Emitter {emitter}, Receiver {receiver}")
-
-    fig.suptitle("Real-Time 3x3 Data Plots")
-    plt.subplots_adjust(bottom=0.2, hspace=0.4)
-
-    # Add a single stop button
-    stop_ax = plt.axes([0.4, 0.05, 0.2, 0.075])
-    stop_button = Button(stop_ax, 'Stop')
-    stop_button.on_clicked(stop)
-
-    # --- Real-time loop ---
+    plt.ion()  # Turn on interactive mode
     while not stop_acquisition:
-        nested_data, nested_metadata, x, cv = store_data_frame(sdata, 100)
+
+        # See the decode_data_frame() function for an example of ultrasonic
+        # data decoding. This function needs the data socket we opened above.
+        [data, metadata, x, cv] = store_data_frame(sdata)
         if x >= 0:
-            for i, md in enumerate(nested_metadata):
-                emitter = md[0]['acq_id']  # row
-                receiver = md[0]['active_channel_index']  # column
-                ax_idx = emitter * 3 + receiver
-                ax = axes[ax_idx]
+            acq_id = metadata[0]['acq_id']
+            compteur_ascan += x
+            # Create the main figure and button
+            if acq_id not in figures_dict:
+                fig, ax = plt.subplots()
+                plt.subplots_adjust(bottom=0.3)
+                line, = ax.plot([], [], lw=2)  # Create an empty line plot
+                ax.set_xlim(0, 2000)
+                ax.set_ylim(-50, 50)
+                ax.set_title(f"Real-Time Data Plot for Acquisition ID {acq_id}")
 
-                # Create line if not yet
-                if lines[ax_idx] is None:
-                    lines[ax_idx], = ax.plot([], [], lw=1)
+                # Add a stop button for the current figure
+                stop_ax = plt.axes([0.4, 0.05, 0.2, 0.075])
+                stop_button = Button(stop_ax, 'Stop')
+                stop_button.on_clicked(stop)
 
-                # Update data
-                samples = np.arange(len(nested_data[i]))
-                lines[ax_idx].set_data(samples, nested_data[i] / cv['factor'])
+                figures_dict[acq_id] = (fig, ax, line, stop_button)  # Store the figure, axes, and line
 
-            # Redraw all subplots at once
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
+            # Retrieve the figure and axes for the current acq_id
+            fig, ax, line, stop_button = figures_dict[acq_id]
+
+            # Update the line data (If in a cycle you have two receivers or more, change the index of the data to plot the desired output)
+            line.set_data(range(len(data[0])), data[0] / cv['factor'])
+
+            # Redraw updated elements
+            ax.draw_artist(ax.patch)  # Redraw background
+            ax.draw_artist(line)  # Redraw the line
+
+            # Update the canvas
+            fig.canvas.blit(ax.bbox)  # Redraw only the axes region
+            fig.canvas.flush_events()  # Process GUI events
+            plt.gcf().canvas.flush_events()
+        #  plt.pause(0.0001)         # Allow GUI events to be processed
+
+        ### To activate if you want to stock data and save it
+        #  data_list.append(data)  # Append the vector to the list
+        #  metadata_list.append(metadata)
 
     plt.ioff()
-    plt.close("all")
+    plt.close("all")  # Close the figure to ensure it can be reopened next time
 
     #### Stop pulser
     ################

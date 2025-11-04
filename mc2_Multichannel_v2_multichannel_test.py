@@ -15,6 +15,8 @@ import pyTPAC.CfgMC2 as CfgMC2
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+
+from matplotlib.pyplot import pause
 from matplotlib.widgets import Button
 import matplotlib
 
@@ -227,12 +229,14 @@ def create_reception(enabled) -> Tpac.ChannelReceptionSpecificationMC2:
         gain_digital_db=00.0,
         gain_normalization_db=0.0,
         start_us=0.0,
-        range_us=150.0,
+        range_us=100.0,
         point_factor=10,
         point_count=0,
         compression=Tpac.EnumCompressionType.eDecimation,
         rectification=Tpac.EnumRectification.eSigned,
-        filter_index=Tpac.EnumOEMPAFilterIndex.eOEMPAFilterOff,
+        #filter_index=Tpac.EnumOEMPAFilterIndex.eOEMPAFilterOff,
+        filter_index=Tpac.EnumOEMPAFilterIndex(10)
+,
 
         dac=create_dac(),
         num_gates=4,
@@ -257,10 +261,10 @@ def create_acquisition(emission_num, reception_num) -> CfgMC2.AcqMC2:
 
 
 def create_filter() -> CfgMC2.FilterDefinition:
-    return CfgMC2.FilterDefinition(Tpac.DigitalFilterBand.high_pass,
+    return CfgMC2.FilterDefinition(Tpac.DigitalFilterBand.band_pass,
                                    attenuation_db=40.0,
                                    freq_a_MHz=0.58,
-                                   freq_b_MHz=15)
+                                   freq_b_MHz=1.22)
 
 
 def decode_data_frame(s: socket.socket) -> int:
@@ -446,7 +450,19 @@ def stop(event):
 axes_dict = {}
 figures_dict = {}
 
+def emitted_pulse(f0, num_periods, fs ):
+    # fs in Mhz
+    #total time in µs
+    # Convert precision to total number of samples
+    T = 1 / f0  # period in µs
+    total_time = num_periods * T
 
+    # Time vector in seconds
+    t = np.linspace(0, total_time, int(fs * total_time), endpoint=False)
+
+    # Generate bipolar square wave
+    pulse = np.sign(np.sin(2 * np.pi * f0 * t))
+    return pulse
 def main():
     """Main function."""
 
@@ -502,21 +518,21 @@ def main():
     print(f"Is awg available on his hardware? {awg_available}")
 
     ##### Configuration loading
-    # filters_definition=[create_filter()] # another create filter for other cycles
-    # for idx, f in enumerate(filters_definition):
-    #  aas.set_filter_definition(hw_id=hw_id,
-    #                            filter_index=Tpac.EnumOEMPAFilterIndex(idx + 1),
-    #                            filter_band=Tpac.DigitalFilterBand(f.filter_band),
-    #                            attenuation_dB=f.attenuation_db,
-    #                            freq_a_MHz=f.freq_a_MHz,
-    #                            freq_b_MHz=f.freq_b_MHz)
+    filters_definition=[create_filter()] # another create filter for other cycles
+    for idx, f in enumerate(filters_definition):
+     aas.set_filter_definition(hw_id=hw_id,
+                               filter_index=Tpac.EnumOEMPAFilterIndex(10),
+                               filter_band=Tpac.DigitalFilterBand(f.filter_band),
+                               attenuation_dB=f.attenuation_db,
+                               freq_a_MHz=f.freq_a_MHz,
+                               freq_b_MHz=f.freq_b_MHz)
 
     # register the acquisition_callback (this last step is instructing AFM API
     # that we want to receive A-scan dataframes for those acquisitions)
     acquisitions = [create_acquisition([0], [0,1,2]),
                     create_acquisition([1], [0,1,2]),
-                    create_acquisition([2], [0,1,2])
-                   ]
+                    create_acquisition([2], [0,1,2])]
+
     for acq_id, acq in enumerate(acquisitions):
         mca = Tpac.MultichannelAcquisition(num_receive_channels=len(acq.receptions),
                                            receptions=acq.receptions,
@@ -592,10 +608,13 @@ def main():
 
     #### Receiving data with decode_data_frame() function
     #####################################################
-    ds_factor = 5
+    ds_factor = 1
+    fs = 100 #Mhz
     point_factor = 10
-    range_us = 150
+    range_us = 100 #us
+    fft_update_every = 20
     plt.ion()  # Turn on interactive mode
+    fft_fig = None  # placeholder for the FFT figure
 
     # Create a 3x3 figure (rows = emitters, columns = receivers)
     fig, axes = plt.subplots(3, 3, figsize=(12, 10))  # 3 emitters x 3 receivers
@@ -607,7 +626,7 @@ def main():
     for row in range(3):
         for col in range(3):
             ax = axes[row, col]
-            ax.set_xlim(0,1000)
+            ax.set_xlim(0,range_us)
 
             ax.set_ylim(-30, 30)
             ax.grid(True)
@@ -622,29 +641,63 @@ def main():
     stop_button.on_clicked(stop)
 
     # ===== Main acquisition loop =====
-    while not stop_acquisition:
+    max_itnum = 3
+    itnum = 0
+    while not stop_acquisition: #and itnum<max_itnum:
+        itnum+=1
         nested_data, nested_metadata, x, cv = store_data_frame(sdata, 160)
         # print((nested_metadata[1]))
-        samples = np.arange(len(nested_data[0]))//ds_factor
+        samples = np.arange(len(nested_data[0]))/(fs/point_factor)
         samples = samples[::ds_factor]
+
+
         if x >= 0:  # Only process A-scan frames
             for ch_idx, metadata in enumerate(nested_metadata):
                 emitter = metadata['acq_id']  # row
                 receiver = metadata['active_channel_index']  # column
                 ax = axes[emitter, receiver]
 
+                ## plot the received Signals
                 # Create line if it does not exist
                 line_idx = emitter * 3 + receiver
                 if lines[line_idx][ch_idx] is None:
                     lines[line_idx][ch_idx], = ax.plot([], [], lw=1)
 
                 downsampled_data = nested_data[ch_idx][::ds_factor]
-
                 lines[line_idx][ch_idx].set_data(samples, downsampled_data / cv['factor'])
+                ## end of signal plots
 
+                ##
+                # plt.figure()
+                #pulse = emitted_pulse(1,1,fs/point_factor)
+                #plt.plot(np.arange(len(pulse))/(fs/point_factor),pulse)
+                thresh_amplitude = 1
+                signal = nested_data[ch_idx]
+                signal = np.copy(signal)
+                signal[0:int(2 * fs / point_factor)] = 0
+                index_thresh = np.argmax(signal<thresh_amplitude)
+                lines[line_idx][ch_idx].set_data( index_thresh/fs/point_factor,signal[index_thresh]/ cv['factor'])
+                # pause(10)
             fig.canvas.draw_idle()
             fig.canvas.flush_events()  # Update GUI
 
+        ##### plotting fft
+        if itnum % fft_update_every == 0:
+            fft_sig = np.abs(np.fft.rfft(nested_data[0]))
+            freq_ax = np.fft.rfftfreq(len(nested_data[0]), 1 / (point_factor))
+
+            # Create FFT figure only once
+            if fft_fig is None:
+                fft_fig, fft_ax = plt.subplots()
+                fft_ax.set_xlabel("Frequency (MHz)")
+                fft_ax.set_ylabel("Magnitude")
+                fft_ax.grid(True)
+                fft_ax.set_title("FFT of channel 0 (update every 5 frames)")
+
+            fft_ax.clear()  # clear previous FFT
+            fft_ax.plot(freq_ax, fft_sig)  # convert Hz → MHz
+            fft_fig.canvas.draw_idle()
+            fft_fig.canvas.flush_events()
     plt.ioff()
     plt.close(fig)
 
