@@ -463,6 +463,129 @@ def emitted_pulse(f0, num_periods, fs ):
     # Generate bipolar square wave
     pulse = np.sign(np.sin(2 * np.pi * f0 * t))
     return pulse
+
+def Manolakis(xe,ye,ze):
+    from numpy.linalg import inv, det
+
+    xe = np.array(xe, dtype=float)
+    ye = np.array(ye, dtype=float)
+    ze = np.array(ze, dtype=float)
+
+    # differences between emitters
+    x21, y21, z21 = xe[1] - xe[0], ye[1] - ye[0], ze[1] - ze[0]
+    x31, y31, z31 = xe[2] - xe[0], ye[2] - ye[0], ze[2] - ze[0]
+
+    # squared distances from origin
+    S = np.sqrt([xe[0] ** 2 + ye[0] ** 2 + ze[0] ** 2,
+                 xe[1] ** 2 + ye[1] ** 2 + ze[1] ** 2,
+                 xe[2] ** 2 + ye[2] ** 2 + ze[2] ** 2])
+
+    delta = np.array([S[0] ** 2 - S[1] ** 2, S[0] ** 2 - S[2] ** 2]).reshape(2, 1)
+    # vertical differences vector d (2x1)
+    d = np.array([[z21], [z31]]).reshape(2, 1)  # shape (2,1)
+
+    # horizontal (x,y) of station 1
+    rh1 = np.array([[xe[0]], [ye[0]]]).reshape(2, 1)  # (2,1)
+
+    W = np.array([[x21, y21],
+                  [x31, y31]])  # shape (2,2)
+    G = inv(W.T) @ inv(W)  # shape (2,2)
+
+    a = 1.0 + (d.T @ G @ d)  # shape (1,1) (matrix), convert to scalar
+    a = a.item()
+
+    # --- lam (4×1) coefficients ---
+    # compute intermediate terms carefully
+    lam0 = -(2 * rh1.T @ inv(W) @ d - 2 * ze[0] + d.T @ (inv(W)).T @ inv(W) @ delta) / (2 * a)
+    lam0 = lam0.item()
+    lam1 = (z21 * (G[0, 0] + G[0, 1]) + z31 * (G[1, 1] + G[0, 1])) / (2 * a)
+    lam2 = -(z21 * G[0, 0] + z31 * G[0, 1]) / (2 * a)
+    lam3 = -(z31 * G[1, 1] + z21 * G[0, 1]) / (2 * a)
+
+    lam = np.array([lam0, lam1, lam2, lam3], dtype=float).reshape(4, 1)
+    lambda3 = lam
+
+    invW = inv(W)
+    w1 = invW[0, :].reshape(1, 2)  # shape (2,)
+    w2 = invW[1, :].reshape(1, 2)  # shape (2,)
+
+    detW = det(W)
+
+    lambda1_term2 = np.array(
+        [[(-w1 @ delta / 2).item()], [((y31 - y21) / (2 * detW)).item()], [(-y31 / (2 * detW)).item()],
+         [(y21 / (2 * detW)).item()]])
+    lambda1_term1 = (-w1 @ d).item() * lam
+    lambda1 = lambda1_term1 + lambda1_term2
+
+    lambda2_term2 = np.array(
+        [[(-w2 @ delta / 2).item()], [((x21 - x31) / (2 * detW)).item()], [(x31 / (2 * detW)).item()],
+         [(-x21 / (2 * detW)).item()]])
+    lambda2_term1 = (-w2 @ d).item() * lam
+    lambda2 = lambda2_term1 + lambda2_term2
+    # Construct a "lambda matrix" (3 x 4) like MATLAB's lambda
+    # Rows: lambda1', lambda2', lambda3' (each is 4-element row)
+    Lambda_mat = np.vstack([lambda1.reshape(1, 4), lambda2.reshape(1, 4), lambda3.reshape(1, 4)])  # shape (3,4)
+
+    L = Lambda_mat[:, 1:].copy()
+    # Diagonal matrices L1,L2,L3 formed from elements 2..4 of lambda1,2,3
+    L1 = np.diag(lambda1[1:4])
+    L2 = np.diag(lambda2[1:4])
+    L3 = np.diag(lambda3[1:4])
+
+    # --- ksi coefficients (10 values) ---
+    # compute the scalar inner products carefully (convert 1x1 arrays to float)
+    invW_term = invW.T @ invW
+
+    ksi0 = lam0 ** 2 - ((delta.T @ invW_term @ delta) / 4.0 + (rh1.T @ invW @ delta).item() + S[0] ** 2) / a
+    ksi0 = ksi0.item()
+    e = delta.T @ inv(W.T) @ invW / 2 + rh1.T @ invW
+    # e is shape (1,2) earlier - convert elements
+    e1 = float(e[0, 0])
+    e2 = float(e[0, 1])
+
+    ksi1 = 2.0 * lam0 * lam1 + (1.0 + e1 + e2) / a
+    ksi2 = 2.0 * lam0 * lam2 - e1 / a
+    ksi3 = 2.0 * lam0 * lam3 - e2 / a
+    ksi4 = lam1 ** 2 - (G[0, 0] + 2.0 * G[0, 1] + G[1, 1]) / (4.0 * a)
+    ksi5 = lam2 ** 2 - G[0, 0] / (4.0 * a)
+    ksi6 = lam3 ** 2 - G[1, 1] / (4.0 * a)
+    ksi7 = 2.0 * lam1 * lam2 + (G[0, 0] + G[0, 1]) / (2.0 * a)
+    ksi8 = 2.0 * lam1 * lam3 + (G[1, 1] + G[0, 1]) / (2.0 * a)
+    ksi9 = 2.0 * lam2 * lam3 - G[0, 1] / (2.0 * a)
+
+    ksi = np.array([ksi0, ksi1, ksi2, ksi3, ksi4, ksi5, ksi6, ksi7, ksi8, ksi9], dtype=float).T
+
+    # --- mu vectors ---
+    mu_plus = np.array([- (w1 @ d).item(), - (w2 @ d).item(), 1]).reshape(3, 1)
+    mu_minus = -mu_plus
+
+    return Lambda_mat, ksi, mu_plus
+
+from scipy.optimize import least_squares
+def trilaterate_nls(emitters, distances, x0=None):
+    """
+    emitters: (N,3) array of emitter coordinates [(x,y,z)...], N>=3
+    distances: (N,) array of distances from unknown receiver to each emitter
+    x0: optional initial guess (3,)
+    returns: estimated position (3,)
+    """
+    emitters = np.asarray(emitters, dtype=float)
+    distances = np.asarray(distances, dtype=float)
+    assert emitters.shape[0] == distances.size
+
+    if x0 is None:
+        # sensible initial guess: weighted mean of emitters
+        x0 = emitters.mean(axis=0)
+
+    def residuals(p):
+        d_model = np.linalg.norm(emitters - p, axis=1)
+        return d_model - distances
+
+    res = least_squares(residuals, x0, method='lm')  # 'lm' or 'trf'
+    return res.x, res
+
+
+
 def main():
     """Main function."""
 
@@ -613,6 +736,10 @@ def main():
     point_factor = 10
     range_us = 100 #us
     fft_update_every = 20
+    T = 20
+    c0 = round(1402.40 + 5.01 * T - 0.055 * T ** 2 + 0.00022 * T ** 3, 1)
+    fs_r = fs / point_factor
+
     plt.ion()  # Turn on interactive mode
     fft_fig = None  # placeholder for the FFT figure
 
@@ -621,7 +748,9 @@ def main():
 
     # Each subplot can have up to 3 lines (for multichannel acquisitions)
     lines = [[None for _ in range(3)] for _ in range(3 * 3)]  # 9 subplots × 3 channels
-
+    D_ToF = np.full((3, 3), None)
+    pos3D_mano = np.full((3, 3), None)
+    pos3D_nls = np.full((3, 3), None)
     # Set up each subplot
     for row in range(3):
         for col in range(3):
@@ -647,7 +776,7 @@ def main():
         itnum+=1
         nested_data, nested_metadata, x, cv = store_data_frame(sdata, 160)
         # print((nested_metadata[1]))
-        samples = np.arange(len(nested_data[0]))/(fs/point_factor)
+        samples = np.arange(len(nested_data[0]))/fs_r
         samples = samples[::ds_factor]
 
 
@@ -666,40 +795,77 @@ def main():
                 downsampled_data = nested_data[ch_idx][::ds_factor]
                 lines[line_idx][ch_idx].set_data(samples, downsampled_data / cv['factor'])
                 ## end of signal plots
+                from scipy.signal import find_peaks
 
                 ##
                 # plt.figure()
-                #pulse = emitted_pulse(1,1,fs/point_factor)
-                #plt.plot(np.arange(len(pulse))/(fs/point_factor),pulse)
-                thresh_amplitude = 1
+                #pulse = emitted_pulse(1,1,fs_r)
+                #plt.plot(np.arange(len(pulse))/fs_r,pulse)
                 signal = nested_data[ch_idx]
                 signal = np.copy(signal)
-                signal[0:int(2 * fs / point_factor)] = 0
-                index_thresh = np.argmax(signal<thresh_amplitude)
-                lines[line_idx][ch_idx].set_data( index_thresh/fs/point_factor,signal[index_thresh]/ cv['factor'])
+                signal = signal / np.max(signal)
+                signal[0:int(10 * fs_r)] = 0
+                peak = find_peaks(signal, prominence=1e-2)[0]
+                ax.plot(
+                    peak / fs_r,
+                    signal[peak],
+                    'bo'
+                )
+                zero_idx = peak - 0.25 * fs_r
+                ax.plot(
+                    zero_idx / fs_r,
+                    signal[peak],
+                    'ro'
+                )
+                D_ToF[emitter,receiver] = (zero_idx / fs_r) * c0 * 1e3
+
+
+
+
                 # pause(10)
             fig.canvas.draw_idle()
             fig.canvas.flush_events()  # Update GUI
 
         ##### plotting fft
-        if itnum % fft_update_every == 0:
-            fft_sig = np.abs(np.fft.rfft(nested_data[0]))
-            freq_ax = np.fft.rfftfreq(len(nested_data[0]), 1 / (point_factor))
+            if itnum % fft_update_every == 0:
+                fft_sig = np.abs(np.fft.rfft(nested_data[0]))
+                freq_ax = np.fft.rfftfreq(len(nested_data[0]), 1 / (point_factor))
 
-            # Create FFT figure only once
-            if fft_fig is None:
-                fft_fig, fft_ax = plt.subplots()
-                fft_ax.set_xlabel("Frequency (MHz)")
-                fft_ax.set_ylabel("Magnitude")
-                fft_ax.grid(True)
-                fft_ax.set_title("FFT of channel 0 (update every 5 frames)")
+                # Create FFT figure only once
+                if fft_fig is None:
+                    fft_fig, fft_ax = plt.subplots()
+                    fft_ax.set_xlabel("Frequency (MHz)")
+                    fft_ax.set_ylabel("Magnitude")
+                    fft_ax.grid(True)
+                    fft_ax.set_title("FFT of channel 0 (update every 5 frames)")
 
-            fft_ax.clear()  # clear previous FFT
-            fft_ax.plot(freq_ax, fft_sig)  # convert Hz → MHz
-            fft_fig.canvas.draw_idle()
-            fft_fig.canvas.flush_events()
+                fft_ax.clear()  # clear previous FFT
+                fft_ax.plot(freq_ax, fft_sig)  # convert Hz → MHz
+                fft_fig.canvas.draw_idle()
+                fft_fig.canvas.flush_events()
+
+
     plt.ioff()
     plt.close(fig)
+
+    for ir in range(3):
+        R1, R2, R3 = D_ToF[0,ir], D_ToF[1,ir], D_ToF[2,ir]
+        u = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2]).reshape(4, 1)
+        v = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2, R1 ** 4, R2 ** 4, R3 ** 4, R1 ** 2 * R2 ** 2, R1 ** 2 * R3 ** 2,
+                      R2 ** 2 * R3 ** 2]).reshape(10, 1)
+
+        e1 = []
+        e2 = []
+        e3 = []
+
+        Lambda_mat, ksi, mu_plus = Manolakis([e1[0],e2[0],e3[0]], [e1[1],e2[1],e3[1]], [e1[2],e2[2],e3[2]])
+        # computed target position
+        rc_plus = (Lambda_mat @ u) + (mu_plus * np.sqrt((ksi.T @ v).item()))
+        pos3D_mano[ir, :] = np.ravel(rc_plus)
+
+        pos3D_nls[ir],res_nls= trilaterate_nls([e1,e2,e3])
+        print('Position using Monalokis: ',pos3D_mano[ir])
+        print('Position using NLS: 'pos3D_nls[ir]+ ' res error: ', res_nls)
 
     ### To activate if you want to stock data and save it
         #  data_list.append(data)  # Append the vector to the list
