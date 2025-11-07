@@ -230,7 +230,7 @@ def create_reception(enabled) -> Tpac.ChannelReceptionSpecificationMC2:
         gain_normalization_db=0.0,
         start_us=0.0,
         range_us=100.0,
-        point_factor=10,
+        point_factor=5,
         point_count=0,
         compression=Tpac.EnumCompressionType.eDecimation,
         rectification=Tpac.EnumRectification.eSigned,
@@ -576,6 +576,7 @@ def trilaterate_nls(emitters, distances, x0=None):
     if x0 is None:
         # sensible initial guess: weighted mean of emitters
         x0 = emitters.mean(axis=0)
+        x0[2]= 62
 
     def residuals(p):
         d_model = np.linalg.norm(emitters - p, axis=1)
@@ -583,6 +584,48 @@ def trilaterate_nls(emitters, distances, x0=None):
 
     res = least_squares(residuals, x0, method='lm')  # 'lm' or 'trf'
     return res.x, res
+
+import numpy as np
+from scipy.optimize import least_squares
+
+def trilaterate_shared_x(emitters, distances_all, x0=None):
+    """
+    Trilaterate positions of multiple receivers that share the same x coordinate.
+
+    emitters: (N, 3) array of emitter coordinates [(x, y, z)...]
+    distances_all: (M, N) array of measured distances [receiver_i, emitter_j]
+    x0: optional initial guess for optimization
+
+    Returns:
+        receivers: (M, 3) array of estimated receiver positions
+        res: least_squares result object
+    """
+    emitters = np.asarray(emitters, dtype=float)
+    distances_all = np.asarray(distances_all, dtype=float)
+    M, N = distances_all.shape
+
+    # Initial guess
+    if x0 is None:
+        mean_x = emitters[:, 0].mean()
+        mean_y = emitters[:, 1].mean()
+        mean_z = emitters[:, 2].mean()
+        x0 = np.array([mean_x] + [mean_y, mean_z] * M)
+
+    def residuals(vars):
+        x_shared = vars[0]
+        res_list = []
+        for i in range(M):
+            yi, zi = vars[1 + 2*i:1 + 2*i + 2]
+            Ri = np.array([x_shared, yi, zi])
+            d_model = np.linalg.norm(emitters - Ri, axis=1)
+            res_list.append(d_model - distances_all[i])
+        return np.concatenate(res_list)
+
+    res = least_squares(residuals, x0, method='lm')
+    vars_opt = res.x
+    x_shared = vars_opt[0]
+    receivers = np.array([[x_shared, vars_opt[1 + 2*i], vars_opt[1 + 2*i + 1]] for i in range(M)])
+    return receivers, res
 
 
 
@@ -733,7 +776,7 @@ def main():
     #####################################################
     ds_factor = 1
     fs = 100 #Mhz
-    point_factor = 10
+    point_factor = 5
     range_us = 100 #us
     fft_update_every = 20
     T = 20
@@ -748,9 +791,11 @@ def main():
 
     # Each subplot can have up to 3 lines (for multichannel acquisitions)
     lines = [[None for _ in range(3)] for _ in range(3 * 3)]  # 9 subplots × 3 channels
-    D_ToF = np.full((3, 3), None)
+    D_ToF = np.full((3, 3), 0,dtype=float)
     pos3D_mano = np.full((3, 3), None)
     pos3D_nls = np.full((3, 3), None)
+    peak_markers = [[None for _ in range(3)] for _ in range(3)]
+    zero_markers = [[None for _ in range(3)] for _ in range(3)]
     # Set up each subplot
     for row in range(3):
         for col in range(3):
@@ -784,6 +829,7 @@ def main():
             for ch_idx, metadata in enumerate(nested_metadata):
                 emitter = metadata['acq_id']  # row
                 receiver = metadata['active_channel_index']  # column
+                # print(emitter,receiver)
                 ax = axes[emitter, receiver]
 
                 ## plot the received Signals
@@ -794,82 +840,106 @@ def main():
 
                 downsampled_data = nested_data[ch_idx][::ds_factor]
                 lines[line_idx][ch_idx].set_data(samples, downsampled_data / cv['factor'])
-                ## end of signal plots
-                from scipy.signal import find_peaks
 
+                ## end of signal plots
+
+                from scipy.signal import find_peaks
                 ##
                 # plt.figure()
-                #pulse = emitted_pulse(1,1,fs_r)
-                #plt.plot(np.arange(len(pulse))/fs_r,pulse)
-                signal = nested_data[ch_idx]
+                # pulse = emitted_pulse(1,1,fs_r)
+                # plt.plot(np.arange(len(pulse))/fs_r,pulse)
+                signal = nested_data[ch_idx]/cv['factor']
                 signal = np.copy(signal)
-                signal = signal / np.max(signal)
-                signal[0:int(10 * fs_r)] = 0
-                peak = find_peaks(signal, prominence=1e-2)[0]
-                ax.plot(
-                    peak / fs_r,
-                    signal[peak],
-                    'bo'
-                )
+                signal_norm = signal / np.max(signal)
+                signal_norm[0:int(10 * fs_r)] = 0
+                peak,_ = find_peaks(signal_norm, prominence=1e-1)
+                peak = peak[0]
                 zero_idx = peak - 0.25 * fs_r
-                ax.plot(
-                    zero_idx / fs_r,
-                    signal[peak],
-                    'ro'
-                )
-                D_ToF[emitter,receiver] = (zero_idx / fs_r) * c0 * 1e3
+
+                D_ToF[emitter, receiver] = (zero_idx/(fs_r*1e6)) * c0 * 1e3
+                print(f"Emitter: {emitter}, Receiver: {receiver}, D_ToF: {D_ToF[emitter, receiver]:.3f} mm")
+
+                if peak_markers[emitter][receiver] is None:
+                    peak_markers[emitter][receiver], = ax.plot(
+                        peak / fs_r, signal[peak], 'bo', markersize=6
+                    )
+                else:
+                    peak_markers[emitter][receiver].set_data([peak/ fs_r], [signal[peak]])
+
+                # Update or create the red zero-cross marker
+                if zero_markers[emitter][receiver] is None:
+                    zero_markers[emitter][receiver], = ax.plot(
+                        zero_idx / fs_r, signal[int(zero_idx)], 'ro', markersize=6
+                    )
+                else:
+                    zero_markers[emitter][receiver].set_data([zero_idx / fs_r], [signal[int(zero_idx)]])
 
 
 
 
-                # pause(10)
+
+
+
             fig.canvas.draw_idle()
             fig.canvas.flush_events()  # Update GUI
+            plt.gcf().canvas.flush_events()
 
+            plt.pause(0.0001)
         ##### plotting fft
-            if itnum % fft_update_every == 0:
-                fft_sig = np.abs(np.fft.rfft(nested_data[0]))
-                freq_ax = np.fft.rfftfreq(len(nested_data[0]), 1 / (point_factor))
+            # if itnum % fft_update_every == 0:
+            #     fft_sig = np.abs(np.fft.rfft(nested_data[0]))
+            #     freq_ax = np.fft.rfftfreq(len(nested_data[0]), 1 / (point_factor))
+            #
+            #     # Create FFT figure only once
+            #     if fft_fig is None:
+            #         fft_fig, fft_ax = plt.subplots()
+            #         fft_ax.set_xlabel("Frequency (MHz)")
+            #         fft_ax.set_ylabel("Magnitude")
+            #         fft_ax.grid(True)
+            #         fft_ax.set_title("FFT of channel 0 (update every 5 frames)")
+            #
+            #     fft_ax.clear()  # clear previous FFT
+            #     fft_ax.plot(freq_ax, fft_sig)  # convert Hz → MHz
+            #     fft_fig.canvas.draw_idle()
+            #     fft_fig.canvas.flush_events()
+            for ir in range(3):
+                R1, R2, R3 = D_ToF[0, ir], D_ToF[1, ir], D_ToF[2, ir]
+                u = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2]).reshape(4, 1)
+                v = np.array(
+                    [1, R1 ** 2, R2 ** 2, R3 ** 2, R1 ** 4, R2 ** 4, R3 ** 4, R1 ** 2 * R2 ** 2, R1 ** 2 * R3 ** 2,
+                     R2 ** 2 * R3 ** 2]).reshape(10, 1)
 
-                # Create FFT figure only once
-                if fft_fig is None:
-                    fft_fig, fft_ax = plt.subplots()
-                    fft_ax.set_xlabel("Frequency (MHz)")
-                    fft_ax.set_ylabel("Magnitude")
-                    fft_ax.grid(True)
-                    fft_ax.set_title("FFT of channel 0 (update every 5 frames)")
+                e1 = [4 * np.sqrt(3), 4, 0]
+                e2 = [0, -8, 0]
+                e3 = [-4 * np.sqrt(3), 4, 0]
 
-                fft_ax.clear()  # clear previous FFT
-                fft_ax.plot(freq_ax, fft_sig)  # convert Hz → MHz
-                fft_fig.canvas.draw_idle()
-                fft_fig.canvas.flush_events()
+                Lambda_mat, ksi, mu_plus = Manolakis([e1[0],e2[0],e3[0]], [e1[1],e2[1],e3[1]], [e1[2],e2[2],e3[2]])
+                # print(Lambda_mat)
+                # print(mu_plus)
+                # print(ksi)
+                # computed target position
+                rc_plus = (Lambda_mat @ u) + (mu_plus * np.sqrt((ksi.T @ v).item()))
+                pos3D_mano[ir, :] = np.ravel(rc_plus)
+                print('Position using Monalokis: ', pos3D_mano)
 
+                # pos3D_nls[ir], res_nls = trilaterate_nls([e1, e2, e3], [R1, R2, R3])
+
+                # print(R1, R2, R3)
+                # print('Position using NLS: ', pos3D_nls[ir], ' res error: ', res_nls.fun)
+
+                # receivers_est, res = trilaterate_shared_x([e1, e2, e3], [R1, R2, R3])
+                #
+                #
+                # print("Estimated receiver positions:\n", receivers_est)
+                # print("Residual RMS error:", np.sqrt(np.mean(res.fun ** 2)))
+            ### To activate if you want to stock data and save it
+            #  data_list.append(data)  # Append the vector to the list
+            #  metadata_list.append(metadata)
 
     plt.ioff()
     plt.close(fig)
 
-    for ir in range(3):
-        R1, R2, R3 = D_ToF[0,ir], D_ToF[1,ir], D_ToF[2,ir]
-        u = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2]).reshape(4, 1)
-        v = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2, R1 ** 4, R2 ** 4, R3 ** 4, R1 ** 2 * R2 ** 2, R1 ** 2 * R3 ** 2,
-                      R2 ** 2 * R3 ** 2]).reshape(10, 1)
 
-        e1 = []
-        e2 = []
-        e3 = []
-
-        Lambda_mat, ksi, mu_plus = Manolakis([e1[0],e2[0],e3[0]], [e1[1],e2[1],e3[1]], [e1[2],e2[2],e3[2]])
-        # computed target position
-        rc_plus = (Lambda_mat @ u) + (mu_plus * np.sqrt((ksi.T @ v).item()))
-        pos3D_mano[ir, :] = np.ravel(rc_plus)
-
-        pos3D_nls[ir],res_nls= trilaterate_nls([e1,e2,e3])
-        print('Position using Monalokis: ',pos3D_mano[ir])
-        print('Position using NLS: 'pos3D_nls[ir]+ ' res error: ', res_nls)
-
-    ### To activate if you want to stock data and save it
-        #  data_list.append(data)  # Append the vector to the list
-        #  metadata_list.append(metadata)
 
     #### Stop pulser
     ################
