@@ -10,8 +10,8 @@ start reading from the main() function to understand how things are working.
 import os
 import socket
 import sys
-# import pyTPAC.Tpac as Tpac
-# import pyTPAC.CfgMC2 as CfgMC2
+import pyTPAC.Tpac as Tpac
+import pyTPAC.CfgMC2 as CfgMC2
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -647,45 +647,6 @@ def trilaterate_nls(emitters, distances, x0=None):
 import numpy as np
 from scipy.optimize import least_squares
 
-def trilaterate_shared_x(emitters, distances_all, x0=None):
-    """
-    Trilaterate positions of multiple receivers that share the same x coordinate.
-
-    emitters: (N, 3) array of emitter coordinates [(x, y, z)...]
-    distances_all: (M, N) array of measured distances [receiver_i, emitter_j]
-    x0: optional initial guess for optimization
-
-    Returns:
-        receivers: (M, 3) array of estimated receiver positions
-        res: least_squares result object
-    """
-    emitters = np.asarray(emitters, dtype=float)
-    distances_all = np.asarray(distances_all, dtype=float)
-    M, N = distances_all.shape
-
-    # Initial guess
-    if x0 is None:
-        mean_x = emitters[:, 0].mean()
-        mean_y = emitters[:, 1].mean()
-        mean_z = emitters[:, 2].mean()
-        x0 = np.array([mean_x] + [mean_y, mean_z] * M)
-
-    def residuals(vars):
-        x_shared = vars[0]
-        res_list = []
-        for i in range(M):
-            yi, zi = vars[1 + 2*i:1 + 2*i + 2]
-            Ri = np.array([x_shared, yi, zi])
-            d_model = np.linalg.norm(emitters - Ri, axis=1)
-            res_list.append(d_model - distances_all[i])
-        return np.concatenate(res_list)
-
-    res = least_squares(residuals, x0, method='lm')
-    vars_opt = res.x
-    x_shared = vars_opt[0]
-    receivers = np.array([[x_shared, vars_opt[1 + 2*i], vars_opt[1 + 2*i + 1]] for i in range(M)])
-    return receivers, res
-
 def calculate_position(D_ToF,e1,e2,e3):
     R1, R2, R3 = D_ToF[0], D_ToF[1], D_ToF[2]
     u = np.array([1, R1 ** 2, R2 ** 2, R3 ** 2]).reshape(4, 1)
@@ -766,9 +727,9 @@ def main():
 
     # register the acquisition_callback (this last step is instructing AFM API
     # that we want to receive A-scan dataframes for those acquisitions)
-    acquisitions = [create_acquisition([0], [0,1,2]),
-                    create_acquisition([1], [0,1,2]),
-                    create_acquisition([2], [0,1,2])]
+    acquisitions = [create_acquisition([0], [5,6,7]),
+                    create_acquisition([1], [5,6,7]),
+                    create_acquisition([2], [5,6,7])]
 
     for acq_id, acq in enumerate(acquisitions):
         mca = Tpac.MultichannelAcquisition(num_receive_channels=len(acq.receptions),
@@ -804,11 +765,13 @@ def main():
     aas.configure_hw_MC2(hw_id=hw_id,
                          device_settings=device_setting,
                          write_file=1)
+
+
     # aas.configure_hw_MC2(hw_id,
     #                       device_setting,
     #                       num_acquisitions=nb_acqs,
     #                       acquisition_ids=acquisitions_list,
-    #                       write_file = False)
+    #                       write_file = 1)
 
     #### Opening a socket: will be used to gather data
     ##################################################
@@ -825,10 +788,11 @@ def main():
         aas.disconnect(hw_id)
         aas.close()
         return 0
-
-    #### Start acquisition
-    ######################
-
+    ############################################
+    ############################################
+    #### Start acquisition ######################
+    ############################################
+    ############################################
     isStarted = aas.enable_pulser(hw_id)['hw_id'] == hw_id
     if isStarted:
         print("- enable_pulser success")
@@ -851,9 +815,14 @@ def main():
     point_factor = 5
     range_us = 100 #us
     fc = 1 #MHZ
-    e1 = [4 * np.sqrt(3), 4, 0]
-    e2 = [0, -8, 0]
-    e3 = [-4 * np.sqrt(3), 4, 0]
+    e1 = [7.64121 , 10.51722 , 0]
+    e2 = [12.36373, -4.01722, 0]
+    e3 = [0 , -13 , 0]
+    NUM_EMITTERS = 3
+    ACTIVE_CHANNELS = [5, 7]  # the ones physically connected
+    receiver_to_col = {5: 0, 7:1}
+    NUM_RECEIVERS = len(ACTIVE_CHANNELS)
+    MAX_CHANNELS = 8
     plotting = True
 
     fft_update_every = 20
@@ -861,26 +830,29 @@ def main():
     c0 = round(1402.40 + 5.01 * T - 0.055 * T ** 2 + 0.00022 * T ** 3, 1)
     fs_r = fs / point_factor
     fft_fig = None  # placeholder for the FFT figure
+
+    D_ToF = np.full((NUM_EMITTERS, NUM_RECEIVERS), 0.0)
+    pos3D_mano = np.full((NUM_RECEIVERS,3), None)
+    pos3D_nls = np.full((NUM_RECEIVERS,3), None)
     if plotting:
         plt.ion()  # Turn on interactive mode
 
 
-    # Create a 3x3 figure (rows = emitters, columns = receivers)
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10))  # 3 emitters x 3 receivers
+        # Create a 3x3 figure (rows = emitters, columns = receivers)
+        fig, axes = plt.subplots(NUM_EMITTERS, NUM_RECEIVERS, figsize=(12, 10))  # 3 emitters x 3 receivers
 
     ## initialization of the parameters
     # Each subplot can have up to 3 lines (for multichannel acquisitions)
-    lines = [[None for _ in range(3)] for _ in range(3 * 3)]  # 9 subplots × 3 channels
-    D_ToF = np.full((3, 3), 0,dtype=float)
-    pos3D_mano = np.full((3, 3), None)
-    pos3D_nls = np.full((3, 3), None)
-    peak_markers = [[None for _ in range(3)] for _ in range(3)]
-    zero_markers = [[None for _ in range(3)] for _ in range(3)]
+        lines = [
+            [None for _ in range(NUM_RECEIVERS)]  # one per plotted receiver
+            for _ in range(NUM_EMITTERS)
+        ]
+        peak_markers = [[None for _ in range(NUM_RECEIVERS)] for _ in range(NUM_EMITTERS)]
+        zero_markers = [[None for _ in range(NUM_RECEIVERS)] for _ in range(NUM_EMITTERS)]
 
-    if plotting:
         # Set up each subplot
-        for row in range(3):
-            for col in range(3):
+        for row in range(NUM_EMITTERS):
+            for col in range(NUM_RECEIVERS):
                 ax = axes[row, col]
                 ax.set_xlim(0,range_us)
 
@@ -902,28 +874,29 @@ def main():
         itnum+=1
         nested_data, nested_metadata, x, cv = store_data_frame(sdata, 160)
         start_time = time.time()
-        # print((nested_metadata[1]))
-        samples = np.arange(len(nested_data[0]))/fs_r
-        downsampled_samples = samples[::ds_factor]
-
-
+        #print((nested_metadata[2]))
         if x >= 0:  # Only process A-scan frames
             for ch_idx, metadata in enumerate(nested_metadata):
+                #print('ch_idx:',ch_idx)
                 emitter = metadata['acq_id']  # row
-                receiver = metadata['active_channel_index']  # column
-                # print(emitter,receiver)
 
+                receiver = metadata['active_channel_index']  # column
+                #print("ch_idx:", ch_idx, "emitter:", emitter, "receiver:", receiver)
+                if receiver not in ACTIVE_CHANNELS:
+                    continue
+                col = receiver_to_col[receiver]
 
                 signal_orig = nested_data[ch_idx]/cv['factor']
                 downsampled_data = signal_orig[::ds_factor]
+                samples = np.arange(len(nested_data[0])) / fs_r
+                downsampled_samples = samples[::ds_factor]
                 if plotting:
-                    ax = axes[emitter, receiver]
+                    ax = axes[emitter, col]
                     ## plot the received Signals
                     # Create line if it does not exist
-                    line_idx = emitter * 3 + receiver
-                    if lines[line_idx][ch_idx] is None:
-                        lines[line_idx][ch_idx], = ax.plot([], [], lw=1)
-                    lines[line_idx][ch_idx].set_data(downsampled_samples, downsampled_data)
+                    if lines[emitter][col] is None:
+                        lines[emitter][col], = ax.plot([], [], lw=1)
+                    lines[emitter][col].set_data(downsampled_samples, downsampled_data)
 
                 ## end of signal plots
 
@@ -934,31 +907,32 @@ def main():
                     # pulse = emitted_pulse(1,1,fs_r)
                     # plt.plot(np.arange(len(pulse))/fs_r,pulse)
 
+                print(f"Emitter: {emitter}, Receiver: {col} ")
 
                 signal_norm = signal_orig / np.max(signal_orig) # normalize
-                signal_norm[0:int(10 * fs)] = 0 # set the first 10 us, zero
-                peak,_ = find_peaks(signal_norm, prominence=1e-1) # find the first peak
-                peak = peak[0]
-                zero_idx = peak - 0.25 * fs/fc # from the peak go back .25 of the perios
+                signal_norm[0:int(10 * fs_r)] = 0 # set the first 10 us, zero
+                peaks,_ = find_peaks(signal_norm, prominence=1e-1) # find the first peak
+                peak = peaks[0]
+                zero_idx = peak - 0.25 * fs_r/fc # from the peak go back .25 of the perios
 
-                D_ToF[emitter, receiver] = (zero_idx/(fs*1e6)) * c0 * 1e3
-                print(f"Emitter: {emitter}, Receiver: {receiver}, D_ToF: {D_ToF[emitter, receiver]:.3f} mm")
+                D_ToF[emitter, col] = (zero_idx/(fs_r*1e6)) * c0 * 1e3
+                print(f"Emitter: {emitter}, Receiver: {col}, D_ToF: {D_ToF[emitter, col]:.3f} mm")
 
                 if plotting:
-                    if peak_markers[emitter][receiver] is None:
-                        peak_markers[emitter][receiver], = ax.plot(
-                            peak / fs_r, downsampled_data[peak], 'bo', markersize=6
+                    if peak_markers[emitter][col] is None:
+                        peak_markers[emitter][col], = ax.plot(
+                            [downsampled_samples[peak // ds_factor]], downsampled_data[peak//ds_factor], 'bo', markersize=6
                         )
                     else:
-                        peak_markers[emitter][receiver].set_data([peak/ fs_r], [downsampled_data[peak]])
+                        peak_markers[emitter][col].set_data([downsampled_samples[peak// ds_factor]], [downsampled_data[peak//ds_factor]])
 
                     # Update or create the red zero-cross marker
-                    if zero_markers[emitter][receiver] is None:
-                        zero_markers[emitter][receiver], = ax.plot(
-                            zero_idx / fs_r, downsampled_data[zero_idx], 'ro', markersize=6
+                    if zero_markers[emitter][col] is None:
+                        zero_markers[emitter][col], = ax.plot(
+                            [downsampled_samples[int(zero_idx // ds_factor)]], downsampled_data[int(zero_idx//ds_factor)], 'ro', markersize=6
                         )
                     else:
-                        zero_markers[emitter][receiver].set_data([zero_idx / fs_r], [downsampled_data[zero_idx]])
+                        zero_markers[emitter][col].set_data([downsampled_samples[int(zero_idx // ds_factor)]], [downsampled_data[int(zero_idx//ds_factor)]])
 
 
             if plotting:
@@ -989,12 +963,24 @@ def main():
             #         fft_fig.canvas.draw_idle()
             #         fft_fig.canvas.flush_events()
 
-            for ir in range(3):
+            for ir in range(NUM_RECEIVERS):
                 pos3D_mano[ir] = calculate_position(D_ToF[:,ir],e1,e2,e3)
-                print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
+                #print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
+                if plotting:
+                    # We can write the position on the top subplot for this receiver
+                    # Use the first emitter's row (row 0) and receiver's column index ir
+                    ax = axes[0, ir]
+                    x_text = 0.7 * range_us  # horizontal position in plot coordinates
+                    y_text = 25  # vertical position in plot coordinates
+                    pos_text = f"x={pos3D_mano[ir][0]:.1f}, y={pos3D_mano[ir][1]:.1f}, z={pos3D_mano[ir][2]:.1f}"
 
+                    # If text already exists, update it; otherwise create it
+                    if hasattr(ax, 'pos_text_handle'):
+                        ax.pos_text_handle.set_text(pos_text)
+                    else:
+                        ax.pos_text_handle = ax.text(x_text, y_text, pos_text, fontsize=8, color='red')
             end_time = time.time()
-            print("Total time:", end_time - start_time, "seconds")
+            #print("Total time:", end_time - start_time, "seconds")
 
     plt.ioff()
     plt.close(fig)

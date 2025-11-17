@@ -4,8 +4,9 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/tpacenc" />
+      <excludeFolder url="file://$MODULE_DIR$/tpacenv" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.9 virtualenv at ~/PycharmProjects/tpacproject/tpacenc" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.14 virtualenv at C:\Users\loopx\PycharmProjects\tpacproject\tpacenv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
