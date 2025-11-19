@@ -158,7 +158,7 @@ def create_device_setting() -> Tpac.DeviceSettingsSpecificationMC2:
         attenuator_20db=0,
         analog_gain_db=30.0,
         request_io=Tpac.EnumOEMPARequestIO.eOEMPAOnCycleOnly,
-        awg_mode_enabled=1,
+        awg_mode_enabled=0,
         num_pulses_shapes=len(shapes),
         pulses_shapes=shapes,
         external_reset_all_encoders=Tpac.EnumDigitalInput.eDigitalInputOff
@@ -257,7 +257,7 @@ def create_acquisition(emission_num, reception_num) -> CfgMC2.AcqMC2:
     return CfgMC2.AcqMC2(transmissions,
                          receptions,
                          time_slot_us=850.0,
-                         awg_bipolar_pulsers_selected=1)
+                         awg_bipolar_pulsers_selected=0)
 
 
 def create_filter() -> CfgMC2.FilterDefinition:
@@ -561,91 +561,47 @@ def Manolakis(xe,ye,ze):
 
     return Lambda_mat, ksi, mu_plus
 
-def Manolakis_Souha(xe,ye,ze):
-    # Relative vectors
-    x21, x31 = xe[1] - xe[0], xe[2] - xe[0]
-    y21, y31 = ye[1] - ye[0], ye[2] - ye[0]
-    z21, z31 = ze[1] - ze[0], ze[2] - ze[0]
-
-    # Geometry matrix
-    W = np.array([[x21, y21], [x31, y31]])
-    invW = np.linalg.inv(W)
-    detW = np.linalg.det(W)
-    invWT = invW.T
-    G = invWT @ invW
-
-    S = np.sum(np.stack([xe, ye, ze])**2, axis=0)**0.5
-    delta = np.array([S[0]**2 - S[1]**2, S[0]**2 - S[2]**2])
-    d = np.array([z21, z31])
-    rh1 = np.array([xe[0], ye[0]])
-
-    delta_half = delta / 2
-    e = (delta_half @ invWT @ invW) + (rh1 @ invW)
-    a = 1 + (d @ G @ d)
-
-    lam0 = -(2 * (rh1 @ invW @ d) - 2 * ze[0] + d @ G @ delta) / (2 * a)
-    lam1 = (z21 * (G[0, 0] + G[0, 1]) + z31 * (G[1, 1] + G[0, 1])) / (2 * a)
-    lam2 = -(z21 * G[0, 0] + z31 * G[0, 1]) / (2 * a)
-    lam3 = -(z31 * G[1, 1] + z21 * G[0, 1]) / (2 * a)
-
-    lam = np.array([lam0, lam1, lam2, lam3])
-    lambda_all = np.array([
-        (-invW[0] @ d) * lam + np.array([-invW[0] @ delta_half,
-                                        (y31 - y21) / (2 * detW),
-                                        -y31 / (2 * detW),
-                                        y21 / (2 * detW)]),
-        (-invW[1] @ d) * lam + np.array([-invW[1] @ delta_half,
-                                        (x21 - x31) / (2 * detW),
-                                        x31 / (2 * detW),
-                                        -x21 / (2 * detW)]),
-        lam
-    ])
-
-    # ksi terms
-    ksi = np.zeros(10)
-    ksi[0] = lam0**2 - (delta @ G @ delta_half + rh1 @ invW @ delta + S[0]**2) / a
-    ksi[1] = 2 * lam0 * lam1 + (1 + e[0] + e[1]) / a
-    ksi[2] = 2 * lam0 * lam2 - e[0] / a
-    ksi[3] = 2 * lam0 * lam3 - e[1] / a
-    ksi[4] = lam1**2 - (G[0, 0] + 2 * G[0, 1] + G[1, 1]) / (4 * a)
-    ksi[5] = lam2**2 - G[0, 0] / (4 * a)
-    ksi[6] = lam3**2 - G[1, 1] / (4 * a)
-    ksi[7] = 2 * lam1 * lam2 + (G[0, 0] + G[0, 1]) / (2 * a)
-    ksi[8] = 2 * lam1 * lam3 + (G[1, 1] + G[0, 1]) / (2 * a)
-    ksi[9] = 2 * lam2 * lam3 - G[0, 1] / (2 * a)
-
-    ksi = ksi[:, np.newaxis]
-    mu_plus = np.array([-invW[0] @ d, -invW[1] @ d, 1])[:, np.newaxis]
-
-    return lambda_all, ksi, mu_plus
-
-
 from scipy.optimize import least_squares
 def trilaterate_nls(emitters, distances, x0=None):
     """
-    emitters: (N,3) array of emitter coordinates [(x,y,z)...], N>=3
-    distances: (N,) array of distances from unknown receiver to each emitter
-    x0: optional initial guess (3,)
-    returns: estimated position (3,)
+    Nonlinear least-squares trilateration.
+
+    Parameters
+    ----------
+    emitters : array (N, 3)
+        Coordinates of N emitters (N >= 3)
+    distances : array (N,)
+        Measured distances from unknown point to each emitter
+    x0 : array (3,), optional
+        Initial guess (recommended: Manolakis closed-form)
+
+    Returns
+    -------
+    x : array (3,)
+        Refined position estimate
+    result : OptimizeResult
+        Full least_squares result
     """
+
     emitters = np.asarray(emitters, dtype=float)
-    distances = np.asarray(distances, dtype=float)
-    assert emitters.shape[0] == distances.size
+    distances = np.asarray(distances, dtype=float).flatten()
 
+    N = emitters.shape[0]
+    assert emitters.shape[1] == 3, "Emitters must have 3D coordinates"
+    assert N >= 3, "Need at least 3 emitters for trilateration"
+    assert distances.size == N, "Distances must match number of emitters"
+
+    # If initial guess is missing → geometric centroid
     if x0 is None:
-        # sensible initial guess: weighted mean of emitters
         x0 = emitters.mean(axis=0)
-        x0[2]= 62
 
+    # Define residual vector: model_distances - measured_distances
     def residuals(p):
-        d_model = np.linalg.norm(emitters - p, axis=1)
-        return d_model - distances
+        model = np.linalg.norm(emitters - p, axis=1)
+        return model - distances
 
-    res = least_squares(residuals, x0, method='lm')  # 'lm' or 'trf'
-    return res.x, res
-
-import numpy as np
-from scipy.optimize import least_squares
+    result = least_squares(residuals, x0, method="lm")
+    return result.x, result
 
 def calculate_position(D_ToF,e1,e2,e3):
     R1, R2, R3 = D_ToF[0], D_ToF[1], D_ToF[2]
@@ -824,7 +780,7 @@ def main():
     NUM_RECEIVERS = len(ACTIVE_CHANNELS)
     MAX_CHANNELS = 8
     plotting = True
-
+    GOOD , BAD =0 ,0
     fft_update_every = 20
     T = 20
     c0 = round(1402.40 + 5.01 * T - 0.055 * T ** 2 + 0.00022 * T ** 3, 1)
@@ -833,6 +789,7 @@ def main():
 
     D_ToF = np.full((NUM_EMITTERS, NUM_RECEIVERS), 0.0)
     pos3D_mano = np.full((NUM_RECEIVERS,3), None)
+    pos3D_refined = np.full((NUM_RECEIVERS,3), 0.0)
     pos3D_nls = np.full((NUM_RECEIVERS,3), None)
     if plotting:
         plt.ion()  # Turn on interactive mode
@@ -965,14 +922,26 @@ def main():
 
             for ir in range(NUM_RECEIVERS):
                 pos3D_mano[ir] = calculate_position(D_ToF[:,ir],e1,e2,e3)
-                #print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
+                print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
+                emitters = np.vstack([e1, e2, e3])  # shape (3,3)
+                distances = D_ToF[:, ir]
+                if not np.isnan(pos3D_mano[ir][0]):
+                    pos3D_refined[ir], _ = trilaterate_nls(emitters, distances, pos3D_mano[ir])
+                    #pos3D_refined[ir], _ = trilaterate_nls(emitters, distances)
+
+                    print(f'Position using NLS for {ir}: ', pos3D_refined[ir])
+
+                    GOOD +=1
+                else:
+                    BAD+=1
+                #
                 if plotting:
                     # We can write the position on the top subplot for this receiver
                     # Use the first emitter's row (row 0) and receiver's column index ir
                     ax = axes[0, ir]
                     x_text = 0.7 * range_us  # horizontal position in plot coordinates
                     y_text = 25  # vertical position in plot coordinates
-                    pos_text = f"x={pos3D_mano[ir][0]:.1f}, y={pos3D_mano[ir][1]:.1f}, z={pos3D_mano[ir][2]:.1f}"
+                    pos_text = f"x={pos3D_refined[ir][0]:.2f}, y={pos3D_refined[ir][1]:.2f}, z={pos3D_mano[ir][2]:.2f}"
 
                     # If text already exists, update it; otherwise create it
                     if hasattr(ax, 'pos_text_handle'):
@@ -981,7 +950,7 @@ def main():
                         ax.pos_text_handle = ax.text(x_text, y_text, pos_text, fontsize=8, color='red')
             end_time = time.time()
             #print("Total time:", end_time - start_time, "seconds")
-
+    print('GOOD, BAD', GOOD, BAD)
     plt.ioff()
     plt.close(fig)
 
