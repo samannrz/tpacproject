@@ -70,7 +70,7 @@ th_Dist_em_reco = np.sqrt((xr - xe)**2 + (yr - ye)**2 + (zr - ze)**2)
 print(emitters)
 # Precompute geometry for multilateration
 precomp = prepare_multilateration(emitters)
-
+th_Dist_em_reco = [32.53868, 32.46456 ,32.53868, 32.09396, 31.94572]
 # Compute receiver position
 pos_receiver = multilateration_fast(precomp, th_Dist_em_reco)
 X, Y, Z = pos_receiver

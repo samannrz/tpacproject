@@ -144,9 +144,9 @@ def create_device_setting() -> Tpac.DeviceSettingsSpecificationMC2:
         index_encoder=create_encoder(Tpac.EnumDigitalInput.eDigitalInput03,
                                      Tpac.EnumDigitalInput.eDigitalInput04),
         debouncer_time_us=1.0,
-        negative_pulse_voltage=-200,
-        bipolar_pulse_positive_voltage=50,
-        bipolar_pulse_negative_voltage=50,
+        negative_pulse_voltage=-400,
+        bipolar_pulse_positive_voltage=200,
+        bipolar_pulse_negative_voltage=200,
         probe_center_frequency_mhz=1.0,
         num_digital_outputs=0,
         digital_outputs=[],
@@ -735,9 +735,12 @@ def main():
 
     # register the acquisition_callback (this last step is instructing AFM API
     # that we want to receive A-scan dataframes for those acquisitions)
-    acquisitions = [create_acquisition([0], [5,6,7]),
-                    create_acquisition([1], [5,6,7]),
-                    create_acquisition([2], [5,6,7])]
+    acquisitions = [create_acquisition([0], [5, 6 ,7]),
+                    create_acquisition([1], [5, 6, 7]),
+                    create_acquisition([2], [5, 6, 7]),
+                    create_acquisition([3], [5, 6, 7]),
+                    create_acquisition([4], [5, 6, 7]),
+                    ]
 
     for acq_id, acq in enumerate(acquisitions):
         mca = Tpac.MultichannelAcquisition(num_receive_channels=len(acq.receptions),
@@ -749,7 +752,7 @@ def main():
                                            analog_gain=20.0)
 
         acqui = Tpac.AcqSpec(acq_type=Tpac.AcquisitionType.multichannel,
-                             num_cycles=3,
+                             num_cycles=5,
                              acq_id=acq_id,
                              multichannel_acquisition_spec=mca)
 
@@ -887,14 +890,14 @@ def main():
     itnum = 0 # counting the iteration number
     while not stop_acquisition: #and itnum:
         itnum+=1
-        nested_data, nested_metadata, x, cv = store_data_frame(sdata, 160)
+        nested_data, nested_metadata, x, cv = store_data_frame(sdata, 161)
         start_time = time.time()
         #print((nested_metadata[2]))
         if x >= 0:  # Only process A-scan frames
             for ch_idx, metadata in enumerate(nested_metadata):
                 #print('ch_idx:',ch_idx)
                 emitter = metadata['acq_id']  # row
-
+                #print(nested_metadata[ch_idx])
                 receiver = metadata['active_channel_index']  # column
                 #print("ch_idx:", ch_idx, "emitter:", emitter, "receiver:", receiver)
                 if receiver not in ACTIVE_CHANNELS:
@@ -905,35 +908,22 @@ def main():
                 downsampled_data = signal_orig[::ds_factor]
                 samples = np.arange(len(nested_data[0])) / fs_r
                 downsampled_samples = samples[::ds_factor]
-                if plotting:
-                    ax = axes[emitter, col]
-                    ## plot the received Signals
-                    # Create line if it does not exist
-                    if lines[emitter][col] is None:
-                        lines[emitter][col], = ax.plot([], [], lw=1)
-                    lines[emitter][col].set_data(downsampled_samples, downsampled_data)
-
-                ## end of signal plots
 
                 from scipy.signal import find_peaks
-                ##
-                #if plotting:
-                    # plt.figure()
-                    # pulse = emitted_pulse(1,1,fs_r)
-                    # plt.plot(np.arange(len(pulse))/fs_r,pulse)
-
-                print(f"Emitter: {emitter}, Receiver: {col} ")
-
                 signal_norm = signal_orig / np.max(signal_orig) # normalize
-                signal_norm[0:int(10 * fs_r)] = 0 # set the first 10 us, zero
+                signal_norm[0:int(17 * fs_r)] = 0 # set the first 10 us, zero
                 peaks,_ = find_peaks(signal_norm, prominence=1e-1) # find the first peak
                 peak = peaks[0]
                 zero_idx = peak - 0.25 * fs_r/fc # from the peak go back .25 of the perios
-
                 D_ToF[emitter, col] = (zero_idx/(fs_r*1e6)) * c0 * 1e3
-                print(f"Emitter: {emitter}, Receiver: {col}, D_ToF: {D_ToF[emitter, col]:.3f} mm")
-
+                #print(f"em:{emitter}, rec: {col} , D_ToF: {D_ToF[emitter, col]}")
                 if plotting:
+                    ax = axes[emitter, col]
+                    ## plot the received Signals
+                    # Create line iffit does not exist
+                    if lines[emitter][col] is None:
+                        lines[emitter][col], = ax.plot([], [], lw=1)
+                    lines[emitter][col].set_data(downsampled_samples, downsampled_data)
                     if peak_markers[emitter][col] is None:
                         peak_markers[emitter][col], = ax.plot(
                             [downsampled_samples[peak // ds_factor]], downsampled_data[peak//ds_factor], 'bo', markersize=6
@@ -980,6 +970,11 @@ def main():
 
             for ir in range(NUM_RECEIVERS):
                 distances = D_ToF[:, ir]
+                distances = np.array(distances, dtype=float)
+                print(f"Distances for receiver{ir}:", distances,ir)
+
+                if np.isnan(distances).any():
+                    continue
                 pos3D_fast[ir] = multilateration_fast(precomp, distances)
                 if plotting:
                     # We can write the position on the top subplot for this receiver
