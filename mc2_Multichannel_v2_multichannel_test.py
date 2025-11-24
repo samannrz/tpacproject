@@ -158,7 +158,7 @@ def create_device_setting() -> Tpac.DeviceSettingsSpecificationMC2:
         attenuator_20db=0,
         analog_gain_db=30.0,
         request_io=Tpac.EnumOEMPARequestIO.eOEMPAOnCycleOnly,
-        awg_mode_enabled=0,
+        awg_mode_enabled=1,
         num_pulses_shapes=len(shapes),
         pulses_shapes=shapes,
         external_reset_all_encoders=Tpac.EnumDigitalInput.eDigitalInputOff
@@ -257,7 +257,7 @@ def create_acquisition(emission_num, reception_num) -> CfgMC2.AcqMC2:
     return CfgMC2.AcqMC2(transmissions,
                          receptions,
                          time_slot_us=850.0,
-                         awg_bipolar_pulsers_selected=0)
+                         awg_bipolar_pulsers_selected=1)
 
 
 def create_filter() -> CfgMC2.FilterDefinition:
@@ -811,9 +811,9 @@ def main():
         for row in range(NUM_EMITTERS):
             for col in range(NUM_RECEIVERS):
                 ax = axes[row, col]
-                ax.set_xlim(0,range_us)
+                ax.set_xlim(40,60)
 
-                ax.set_ylim(-30, 30)
+                ax.set_ylim(-20, 20)
                 ax.grid(True)
                 ax.set_title(f"Emitter {row} | Receiver {col}")
 
@@ -864,7 +864,7 @@ def main():
                     # pulse = emitted_pulse(1,1,fs_r)
                     # plt.plot(np.arange(len(pulse))/fs_r,pulse)
 
-                print(f"Emitter: {emitter}, Receiver: {col} ")
+                #print(f"Emitter: {emitter}, Receiver: {col} ")
 
                 signal_norm = signal_orig / np.max(signal_orig) # normalize
                 signal_norm[0:int(10 * fs_r)] = 0 # set the first 10 us, zero
@@ -922,14 +922,14 @@ def main():
 
             for ir in range(NUM_RECEIVERS):
                 pos3D_mano[ir] = calculate_position(D_ToF[:,ir],e1,e2,e3)
-                print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
+                #print(f'Position using Monalokis for {ir}: ', pos3D_mano[ir])
                 emitters = np.vstack([e1, e2, e3])  # shape (3,3)
                 distances = D_ToF[:, ir]
                 if not np.isnan(pos3D_mano[ir][0]):
                     pos3D_refined[ir], _ = trilaterate_nls(emitters, distances, pos3D_mano[ir])
                     #pos3D_refined[ir], _ = trilaterate_nls(emitters, distances)
 
-                    print(f'Position using NLS for {ir}: ', pos3D_refined[ir])
+                    #print(f'Position using NLS for {ir}: ', pos3D_refined[ir])
 
                     GOOD +=1
                 else:
@@ -950,7 +950,7 @@ def main():
                         ax.pos_text_handle = ax.text(x_text, y_text, pos_text, fontsize=8, color='red')
             end_time = time.time()
             #print("Total time:", end_time - start_time, "seconds")
-    print('GOOD, BAD', GOOD, BAD)
+    #print('GOOD, BAD', GOOD, BAD)
     plt.ioff()
     plt.close(fig)
 

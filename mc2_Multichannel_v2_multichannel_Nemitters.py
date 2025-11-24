@@ -145,8 +145,8 @@ def create_device_setting() -> Tpac.DeviceSettingsSpecificationMC2:
                                      Tpac.EnumDigitalInput.eDigitalInput04),
         debouncer_time_us=1.0,
         negative_pulse_voltage=-400,
-        bipolar_pulse_positive_voltage=200,
-        bipolar_pulse_negative_voltage=200,
+        bipolar_pulse_positive_voltage=150,
+        bipolar_pulse_negative_voltage=150,
         probe_center_frequency_mhz=1.0,
         num_digital_outputs=0,
         digital_outputs=[],
@@ -617,27 +617,32 @@ def calculate_position(D_ToF,e1,e2,e3):
     pos3D_mano = np.ravel(rc_plus)
     return pos3D_mano
 
+
 import numpy as np
-from numpy.linalg import pinv, norm, svd
+from numpy.linalg import svd, pinv
 from scipy.optimize import fmin
+
+def null_matlab(A, rtol=1e-12):
+    # Equivalent to MATLAB null(A) using SVD
+    U, s, Vt = svd(A)
+    rank = np.sum(s > rtol * s[0])      # same rank logic as MATLAB
+    return Vt[rank:].T                  # null space basis (4×k)
 
 def prepare_multilateration(emitters):
     emitters = np.asarray(emitters)
-    xe, ye, ze = emitters[:,0], emitters[:,1], emitters[:,2]
+    xe, ye, ze = emitters[:, 0], emitters[:, 1], emitters[:, 2]
     N = len(emitters)
 
+    # Build A = [1, -2xe, -2ye, -2ze]
     A = np.column_stack([np.ones(N), -2*xe, -2*ye, -2*ze])
+
+    # Pseudo-inverse
     pinvA = pinv(A)
 
-    # null-space of A
-    U, S, Vt = svd(A)
-    tol = 1e-12
-    null_mask = (S < tol)
-    if np.all(~null_mask):
-        xh = np.zeros((4,0))
-    else:
-        xh = Vt.T[:, null_mask]
+    # Null-space identical to MATLAB null(A)
+    xh = null_matlab(A)
 
+    # Geometric constant
     b_const = -(xe**2 + ye**2 + ze**2)
 
     return dict(A=A, pinvA=pinvA, xh=xh, b_const=b_const)
@@ -668,6 +673,184 @@ def multilateration_fast(precomp, R):
     X, Y, Z = x[1], x[2], x[3]
     return np.array([X, Y, Z])
 
+
+def heading_from_R1_to_R2(pos3D):
+    """
+    pos3D: array-like shape (2,3) where
+           pos3D[0] = R1 = [x1,y1,z1]
+           pos3D[1] = R2 = [x2,y2,z2]
+
+    Returns:
+        v3 : unit 3D heading vector (R2 - R1) / ||R2-R1||, shape (3,)
+        azimuth_deg : horizontal heading (degrees) in X-Z plane,
+                      measured from +X toward +Z (0..360)
+        dist : Euclidean distance between R1 and R2
+    """
+    pos = np.asarray(pos3D, dtype=float)
+    if pos.shape != (2,3):
+        raise ValueError("pos3D must have shape (2,3): [R1, R2].")
+
+    r1 = pos[0]
+    r2 = pos[1]
+    v = r2 - r1
+    dist = np.linalg.norm(v)
+    if dist == 0:
+        raise ValueError("R1 and R2 are identical — heading undefined.")
+
+    v3 = v / dist  # normalized 3D heading
+
+    # Horizontal projection: because +y is up, the horizontal plane is X-Z.
+    v_horiz = np.array([v3[0], v3[2]])  # [x, z]
+    # If projection is (near) zero length, azimuth is undefined (pure vertical)
+    norm_h = np.linalg.norm(v_horiz)
+    if norm_h < 1e-12:
+        azimuth_deg = None  # or set to 0.0, or raise — depending on what you prefer
+    else:
+        # atan2(z, x) gives angle from +X toward +Z
+        azimuth = np.arctan2(v_horiz[1], v_horiz[0])
+        azimuth_deg = (np.degrees(azimuth) + 360.0) % 360.0
+
+    return v3, azimuth_deg, dist
+def yaw_pitch_roll_from_receivers(R1, R2, R3):
+    """
+    Compute yaw, pitch, roll from 3 receiver positions in 3D.
+    R1, R2, R3: numpy arrays [x, y, z]
+
+    Returns: yaw_deg, pitch_deg, roll_deg
+    """
+
+    # ----- Step 1: Forward direction (R1 -> R2)
+    fwd = R2 - R1
+    fwd_norm = np.linalg.norm(fwd)
+    if fwd_norm < 1e-9:
+        return None, None, None
+    fwd = fwd / fwd_norm   # z-axis
+
+    # ----- Step 2: Side direction (R1 -> R3)
+    side = R3 - R1
+    side_norm = np.linalg.norm(side)
+    if side_norm < 1e-9:
+        return None, None, None
+    side = side / side_norm
+
+    # ----- Step 3: Build orthonormal coordinate frame
+    # x-axis = perpendicular to plane (right-hand rule)
+    x_axis = np.cross(fwd, side)
+    x_norm = np.linalg.norm(x_axis)
+    if x_norm < 1e-9:
+        return None, None, None
+    x_axis = x_axis / x_norm
+
+    # y-axis = perpendicular to x and z
+    y_axis = np.cross(x_axis, fwd)
+    y_axis = y_axis / np.linalg.norm(y_axis)
+
+    # Rotation matrix (columns = axes)
+    R = np.column_stack((x_axis, y_axis, fwd))
+
+    # ----- Step 4: Extract yaw, pitch, roll
+    # Using aerospace convention: yaw (Z), pitch (Y), roll (X)
+    # Based on rotation matrix R = Rz * Ry * Rx
+    yaw = np.degrees(np.arctan2(R[1, 2], R[0, 2]))
+    pitch = np.degrees(np.arcsin(-R[2, 2]))
+    roll = np.degrees(np.arctan2(R[2, 1], R[2, 0]))
+
+    return yaw, pitch, roll
+import numpy as np
+
+def plot_receivers_3d(R1, R2, R3):
+    # Skip if any receiver is missing
+    if R1 is None or R2 is None or R3 is None:
+        print("One of the receiver positions is None. Cannot plot.")
+        return
+
+    # Convert to 2D array
+    try:
+        P = np.array([R1, R2, R3], dtype=float)
+    except Exception as e:
+        print("Error converting receivers to array:", e)
+        return
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot the points
+    ax.scatter(P[:,0], P[:,1], P[:,2], s=80, c=['r','g','b'])
+
+    # Labels
+    ax.text(P[0,0], P[0,1], P[0,2], "R1", color='r')
+    ax.text(P[1,0], P[1,1], P[1,2], "R2", color='g')
+    ax.text(P[2,0], P[2,1], P[2,2], "R3", color='b')
+
+    # Axis labels
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title("3D Receiver Positions")
+
+    # Autoscale
+    margin = 0.1
+    x_min, x_max = P[:,0].min(), P[:,0].max()
+    y_min, y_max = P[:,1].min(), P[:,1].max()
+    z_min, z_max = P[:,2].min(), P[:,2].max()
+
+    ax.set_xlim(x_min - margin, x_max + margin)
+    ax.set_ylim(y_min - margin, y_max + margin)
+    ax.set_zlim(z_min - margin, z_max + margin)
+    ax.view_init(elev=30, azim=-60)
+
+    plt.show()
+
+def plot_y_p_r(yaw, pitch, roll):
+    yaw_rad = np.deg2rad(yaw)
+    pitch_rad = np.deg2rad(pitch)
+    roll_rad = np.deg2rad(roll)
+
+    # Rotation matrices
+    R_yaw = np.array([
+        [np.cos(yaw_rad), -np.sin(yaw_rad), 0],
+        [np.sin(yaw_rad), np.cos(yaw_rad), 0],
+        [0, 0, 1]
+    ])
+
+    R_pitch = np.array([
+        [np.cos(pitch_rad), 0, np.sin(pitch_rad)],
+        [0, 1, 0],
+        [-np.sin(pitch_rad), 0, np.cos(pitch_rad)]
+    ])
+
+    R_roll = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll_rad), -np.sin(roll_rad)],
+        [0, np.sin(roll_rad), np.cos(roll_rad)]
+    ])
+
+    # Combined rotation: R = R_yaw * R_pitch * R_roll
+    R = R_yaw @ R_pitch @ R_roll
+
+    # Forward vector along device x-axis
+    forward = R @ np.array([1, 0, 0])
+
+    # Plotting
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Origin
+    origin = np.array([0, 0, 0])
+
+    # Draw forward vector
+    ax.quiver(*origin, *forward, color='r', length=1.0, arrow_length_ratio=0.2)
+
+    # Set axes
+    ax.set_xlim([-1, 1])
+    ax.set_ylim([-1, 1])
+    ax.set_zlim([-1, 1])
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Device Orientation (Yaw, Pitch, Roll)')
+
+    plt.show()
 
 def main():
     """Main function."""
@@ -737,9 +920,7 @@ def main():
     # that we want to receive A-scan dataframes for those acquisitions)
     acquisitions = [create_acquisition([0], [5, 6 ,7]),
                     create_acquisition([1], [5, 6, 7]),
-                    create_acquisition([2], [5, 6, 7]),
-                    create_acquisition([3], [5, 6, 7]),
-                    create_acquisition([4], [5, 6, 7]),
+                    create_acquisition([2], [5, 6, 7])
                     ]
 
     for acq_id, acq in enumerate(acquisitions):
@@ -752,7 +933,7 @@ def main():
                                            analog_gain=20.0)
 
         acqui = Tpac.AcqSpec(acq_type=Tpac.AcquisitionType.multichannel,
-                             num_cycles=5,
+                             num_cycles=3,
                              acq_id=acq_id,
                              multichannel_acquisition_spec=mca)
 
@@ -831,12 +1012,17 @@ def main():
     e3 = [0 , -13 , 0]
     e4 = [-12.36373 , -4.01722 , 0]
     e5 = [-7.64121 , 10.517 , 0]
-    NUM_EMITTERS = 5
-    ACTIVE_CHANNELS = [5, 7]  # the ones physically connected
-    receiver_to_col = {5: 0, 7:1}
+    e1 = e4
+    e2_old = e2
+    e2 = e3
+    e3 = e2_old
+    NUM_EMITTERS = 3
+    ACTIVE_CHANNELS = [5, 6, 7]  # the ones physically connected
+    receiver_to_col = {5: 0, 6:1, 7:2}
     NUM_RECEIVERS = len(ACTIVE_CHANNELS)
     MAX_CHANNELS = 8
     plotting = True
+    plotting_orient = False
     GOOD , BAD =0 ,0
     fft_update_every = 20
     T = 20
@@ -848,7 +1034,8 @@ def main():
     pos3D_fast = np.full((NUM_RECEIVERS,3), None)
 
 
-    emitters = np.array([e1, e2, e3, e4, e5])  # shape (N,3)
+    emitters = np.array([e1, e2, e3])  # shape (N,3)
+
     precomp = prepare_multilateration(emitters)
 
 
@@ -897,7 +1084,7 @@ def main():
             for ch_idx, metadata in enumerate(nested_metadata):
                 #print('ch_idx:',ch_idx)
                 emitter = metadata['acq_id']  # row
-                #print(nested_metadata[ch_idx])
+                # print(nested_metadata[ch_idx])
                 receiver = metadata['active_channel_index']  # column
                 #print("ch_idx:", ch_idx, "emitter:", emitter, "receiver:", receiver)
                 if receiver not in ACTIVE_CHANNELS:
@@ -915,8 +1102,9 @@ def main():
                 peaks,_ = find_peaks(signal_norm, prominence=1e-1) # find the first peak
                 peak = peaks[0]
                 zero_idx = peak - 0.25 * fs_r/fc # from the peak go back .25 of the perios
+
                 D_ToF[emitter, col] = (zero_idx/(fs_r*1e6)) * c0 * 1e3
-                #print(f"em:{emitter}, rec: {col} , D_ToF: {D_ToF[emitter, col]}")
+                #print(f"{emitter},{col} , zero: {zero_idx}")
                 if plotting:
                     ax = axes[emitter, col]
                     ## plot the received Signals
@@ -940,12 +1128,7 @@ def main():
                         zero_markers[emitter][col].set_data([downsampled_samples[int(zero_idx // ds_factor)]], [downsampled_data[int(zero_idx//ds_factor)]])
 
 
-            if plotting:
-                fig.canvas.draw_idle()
-                fig.canvas.flush_events()  # Update GUI
-                plt.gcf().canvas.flush_events()
 
-                plt.pause(0.0001)
         ##### plotting fft
             # if plotting and plotting_fft_fig:
             #     if itnum % fft_update_every == 0:
@@ -971,30 +1154,50 @@ def main():
             for ir in range(NUM_RECEIVERS):
                 distances = D_ToF[:, ir]
                 distances = np.array(distances, dtype=float)
-                print(f"Distances for receiver{ir}:", distances,ir)
+                #print(f"Distances for receiver{ir}:", distances,ir)
 
                 if np.isnan(distances).any():
                     continue
                 pos3D_fast[ir] = multilateration_fast(precomp, distances)
+                # print(emitters)
+                # print(distances)
+                # print(pos3D_fast[ir])
+
                 if plotting:
                     # We can write the position on the top subplot for this receiver
                     # Use the first emitter's row (row 0) and receiver's column index ir
                     ax = axes[0, ir]
-                    x_text = 0.7 * range_us  # horizontal position in plot coordinates
+                    x_text = 0.7 * 60  # horizontal position in plot coordinates
                     y_text = 25  # vertical position in plot coordinates
-                    pos_text = f"x={pos3D_fast[ir][0]:.2f}, y={pos3D_fast[ir][1]:.2f}, z={pos3D_fast[ir][2]:.2f}"
-
+                    pos_text = f"x={pos3D_fast[ir][0]:.3f}, y={pos3D_fast[ir][1]:.3f}, z={pos3D_fast[ir][2]:.3f}"
                     # If text already exists, update it; otherwise create it
                     if hasattr(ax, 'pos_text_handle'):
                         ax.pos_text_handle.set_text(pos_text)
                     else:
                         ax.pos_text_handle = ax.text(x_text, y_text, pos_text, fontsize=8, color='red')
+
+
+            R1 = pos3D_fast[0]
+            R2 = pos3D_fast[1]
+            R3 = pos3D_fast[2]
+            if R1 is None or R3 is None or any(v is None for v in R1) or any(v is None for v in R3):
+                continue
+            yy,pp,rr=yaw_pitch_roll_from_receivers(R1, R3, R2)
+            print(yaw_pitch_roll_from_receivers(R1, R3, R2))
             end_time = time.time()
+            if plotting:
+                fig.canvas.draw_idle()
+                fig.canvas.flush_events()  # Update GUI
+                plt.gcf().canvas.flush_events()
+
+                plt.pause(0.0001)
             #print("Total time:", end_time - start_time, "seconds")
     plt.ioff()
     plt.close(fig)
 
-
+    print(R1,R2,R3)
+    plot_receivers_3d(R1, R2, R3)
+    plot_y_p_r(yy,pp,rr)
 
     #### Stop pulser
     ################

@@ -2,28 +2,33 @@ import numpy as np
 from numpy.linalg import pinv, norm, svd
 from scipy.optimize import fmin
 
+import numpy as np
+from numpy.linalg import svd, pinv
+
+def null_matlab(A, rtol=1e-12):
+    # Equivalent to MATLAB null(A) using SVD
+    U, s, Vt = svd(A)
+    rank = np.sum(s > rtol * s[0])      # same rank logic as MATLAB
+    return Vt[rank:].T                  # null space basis (4×k)
 
 def prepare_multilateration(emitters):
     emitters = np.asarray(emitters)
-    xe, ye, ze = emitters[:,0], emitters[:,1], emitters[:,2]
+    xe, ye, ze = emitters[:, 0], emitters[:, 1], emitters[:, 2]
     N = len(emitters)
 
+    # Build A = [1, -2xe, -2ye, -2ze]
     A = np.column_stack([np.ones(N), -2*xe, -2*ye, -2*ze])
+
+    # Pseudo-inverse
     pinvA = pinv(A)
 
-    # null-space of A
-    U, S, Vt = svd(A)
-    tol = 1e-12
-    null_mask = (S < tol)
-    if np.all(~null_mask):
-        xh = np.zeros((4,0))
-    else:
-        xh = Vt.T[:, null_mask]
+    # Null-space identical to MATLAB null(A)
+    xh = null_matlab(A)
 
+    # Geometric constant
     b_const = -(xe**2 + ye**2 + ze**2)
 
     return dict(A=A, pinvA=pinvA, xh=xh, b_const=b_const)
-
 def multilateration_fast(precomp, R):
     R = np.asarray(R).flatten()
     pinvA = precomp["pinvA"]
@@ -54,23 +59,30 @@ def multilateration_fast(precomp, R):
 
 
 # Emitters coordinates [mm]
-xe = np.array([7.64121, 12.36373, 0, -12.36373, -7.64121])
+xe = np.array([7.64121, 12.36373,0 , -12.36373, -7.64121])
 ye = np.array([10.51722, -4.01722, -13.0, -4.01722, 10.517])
 ze = np.array([0, 0, 0, 0, 0])
+#
+#
+xe = np.array([-12.36373, 0, 12.36373])
+ye = np.array([-4.01722, -13.0, -4.01722])
+ze = np.array([0, 0, 0])
 
 # Stack into (N,3) for the Python function
 emitters = np.column_stack([xe, ye, ze])
 
 # Receiver coordinate [mm]
-xr, yr, zr = -0.16, -0.1, 34
+xr, yr, zr = 20, -5, 50
 
 # Compute distances from receiver to each emitter
 th_Dist_em_reco = np.sqrt((xr - xe)**2 + (yr - ye)**2 + (zr - ze)**2)
+th_Dist_em_reco = [72,69,64]
 
 print(emitters)
 # Precompute geometry for multilateration
 precomp = prepare_multilateration(emitters)
-th_Dist_em_reco = [32.53868, 32.46456 ,32.53868, 32.09396, 31.94572]
+
+
 # Compute receiver position
 pos_receiver = multilateration_fast(precomp, th_Dist_em_reco)
 X, Y, Z = pos_receiver
